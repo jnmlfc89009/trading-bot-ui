@@ -1,10 +1,25 @@
+"""
+Pairs Trading Pro Explorer
+--------------------------
+An interactive Streamlit dashboard for researching and validating 
+statistical relationships between stock pairs.
+
+Features:
+- Live data fetching via yfinance
+- Z-Score and Cointegration analysis
+- RSI Momentum verification
+- Secure input sanitization
+"""
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import coint
+import re
 
+# --- UI CONFIGURATION ---
 st.set_page_config(page_title="Pairs Trading Pro", layout="wide")
 
 # --- PROMINENT LEGAL DISCLAIMER ---
@@ -13,12 +28,11 @@ st.warning("⚠️ **LEGAL DISCLAIMER:** This tool is for **educational and info
 st.title("📈 Pairs Trading Pro Explorer")
 st.markdown("Enter two tickers to analyze their statistical relationship and identify mean-reversion signals.")
 
-# --- Sidebar Inputs ---
+# --- SIDEBAR: USER INPUTS ---
 st.sidebar.header("Pair Configuration")
 
-# SECURITY: Input sanitization to prevent injection and ensure clean API calls
 def sanitize_ticker(text):
-    import re
+    """Removes special characters to prevent script injection and ensures uppercase."""
     return re.sub(r'[^A-Z0-9.\-]', '', text.upper())
 
 t1_raw = st.sidebar.text_input("Ticker 1", value="LOW")
@@ -28,7 +42,9 @@ t1 = sanitize_ticker(t1_raw)
 t2 = sanitize_ticker(t2_raw)
 time_period = st.sidebar.selectbox("Lookback Period", options=["3mo", "6mo", "1y", "2y"], index=1)
 
+# --- ANALYTICS ENGINE ---
 def calculate_rsi(series, periods=14):
+    """Calculates the Relative Strength Index (RSI) for momentum checks."""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
@@ -37,12 +53,14 @@ def calculate_rsi(series, periods=14):
 
 if st.sidebar.button("Run Deep Analysis"):
     with st.spinner(f"Fetching market data for {t1} and {t2}..."):
+        # 1. DATA INGESTION
         data = yf.download([t1, t2], period=time_period, progress=False)
         
         if not data.empty and len(data.columns) >= 2:
             prices = data['Close'].dropna()
             
-            # --- Identify Higher vs Lower Price ---
+            # 2. PRICE HIERARCHY LOGIC
+            # Automatically identifies which stock is the 'primary' based on price
             p1_last = prices[t1].iloc[-1]
             p2_last = prices[t2].iloc[-1]
             
@@ -53,19 +71,25 @@ if st.sidebar.button("Run Deep Analysis"):
                 high_ticker, low_ticker = t2, t1
                 high_price, low_price = p2_last, p1_last
             
-            # --- Math Engine ---
+            # 3. STATISTICAL CALCULATIONS
+            # Hedge Ratio: Used to equalize the dollar value of both positions
             ratio = high_price / low_price
+            # Spread: The difference between the two stocks over time
             spread = prices[high_ticker] - (ratio * prices[low_ticker])
+            # Z-Score: Standardizes the spread to find statistical outliers
             z_score = (spread - spread.mean()) / spread.std()
             curr_z = z_score.iloc[-1]
             
+            # Correlation: Measures how similarly they move
             correlation = prices[t1].corr(prices[t2])
+            # Cointegration: Measures if they stay tethered over the long term
             score, pvalue, _ = coint(prices[t1], prices[t2])
             
+            # RSI: Measures if the stocks are currently overextended
             rsi1 = calculate_rsi(prices[t1]).iloc[-1]
             rsi2 = calculate_rsi(prices[t2]).iloc[-1]
 
-            # --- Metrics Dashboard ---
+            # --- UI: DASHBOARD ---
             st.subheader("System Health & Live Metrics")
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
             with m_col1:
@@ -77,16 +101,20 @@ if st.sidebar.button("Run Deep Analysis"):
             with m_col4:
                 st.metric("🎯 Current Z", f"{curr_z:.2f}")
 
-            # --- Visualization ---
+            # --- UI: VISUALIZATION ---
             st.subheader("Statistical Divergence Analysis")
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+            
+            # Top Plot: Normalized path starting at 100
             norm1 = (prices[t1] / prices[t1].iloc[0]) * 100
             norm2 = (prices[t2] / prices[t2].iloc[0]) * 100
             ax1.plot(norm1, label=f"{t1} (Normalized)", color='#2ecc71', linewidth=2)
             ax1.plot(norm2, label=f"{t2} (Normalized)", color='#3498db', linewidth=2)
-            ax1.set_title("Price Correlation (Starting at 100)", fontsize=14)
+            ax1.set_title("Price Correlation (Historical Convergence)", fontsize=14)
             ax1.legend()
             ax1.grid(alpha=0.3)
+
+            # Bottom Plot: Z-Score divergence
             ax2.plot(z_score, color='#9b59b6', linewidth=2)
             ax2.axhline(2.0, color='#e74c3c', linestyle='--', label="Sell Threshold")
             ax2.axhline(-2.0, color='#27ae60', linestyle='--', label="Buy Threshold")
@@ -97,7 +125,7 @@ if st.sidebar.button("Run Deep Analysis"):
             plt.tight_layout()
             st.pyplot(fig)
             
-            # --- COMPREHENSIVE RISK ASSESSMENT ---
+            # --- UI: RISK ASSESSMENT ---
             st.divider()
             st.subheader("🕵️ Deep Risk & Suitability Assessment")
             r_col1, r_col2 = st.columns(2)
@@ -128,34 +156,31 @@ if st.sidebar.button("Run Deep Analysis"):
                 else:
                     st.warning("⚠️ Momentum Alert: One stock is reaching an extreme (Overbought/Oversold).")
 
-            # --- FINAL INTEGRATED TRADING VERDICT ---
+            # --- UI: FINAL INTEGRATED TRADING VERDICT ---
             st.markdown("### 🏁 Final Execution Signal")
             
             z_signal = abs(curr_z) >= 2.0
             
-            # The "Informed" Logic: All 3 pillars must be green for a Strong Signal
             if z_signal and coint_pass and corr_pass and rsi_neutral:
                 if curr_z >= 2.0:
-                    st.error(f"🚀 **STRONG SELL SIGNAL:** All conditions met. {high_ticker} is extremely overvalued vs {low_ticker}. Probabilistic high-conviction trade.")
+                    st.error(f"🚀 **STRONG SELL SIGNAL:** {high_ticker} is statistically overvalued vs {low_ticker}. Entry recommended.")
                 else:
-                    st.success(f"🚀 **STRONG BUY SIGNAL:** All conditions met. {high_ticker} is extremely undervalued vs {low_ticker}. Probabilistic high-conviction trade.")
+                    st.success(f"🚀 **STRONG BUY SIGNAL:** {high_ticker} is statistically undervalued vs {low_ticker}. Entry recommended.")
             
             elif z_signal:
-                # Z-Score is triggered, but other factors are failing
                 reasons = []
-                if not coint_pass: reasons.append("Weak Cointegration (P-Value > 0.05)")
+                if not coint_pass: reasons.append("Weak Cointegration")
                 if not corr_pass: reasons.append("Low Correlation")
-                if not rsi_neutral: reasons.append("Extreme RSI (Momentum Risk)")
-                
-                st.warning(f"⚠️ **CAUTION:** Z-Score is at a signal level ({curr_z:.2f}), but the trade is **NOT** recommended due to: {', '.join(reasons)}.")
+                if not rsi_neutral: reasons.append("Extreme RSI")
+                st.warning(f"⚠️ **CAUTION:** Z-Score is at signal level ({curr_z:.2f}), but entry is discouraged due to: {', '.join(reasons)}.")
             
             elif not z_signal and coint_pass and corr_pass:
-                st.info("⚖️ **WAITING:** The relationship is statistically perfect, but the stocks are currently at equilibrium. No entry signal yet.")
+                st.info("⚖️ **WAITING:** Relationship is strong, but stocks are currently at equilibrium. No entry yet.")
             
             else:
-                st.info("⚖️ **NO SIGNAL:** No statistical divergence detected.")
+                st.info("⚖️ **NO SIGNAL:** No reliable statistical divergence detected.")
                 
             st.caption("Disclaimer: This tool provides mathematical analysis only. All trading involves capital risk.")
 
         else:
-            st.error("Error: Could not retrieve data. Please ensure the tickers are correct.")
+            st.error("Error: Could not retrieve data. Please ensure the tickers are correct and include suffixes for non-US stocks (e.g. .SI).")
