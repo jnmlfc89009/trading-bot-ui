@@ -60,7 +60,8 @@ async def send_telegram_notification(pair_name, z_score, instruction):
         f"🤖 **TRADING AGENT SIGNAL**\n\n"
         f"**Pair:** {pair_name}\n"
         f"**Z-Score:** {z_score:.2f} σ\n\n"
-        f"🚨 **ACTION:**\n{instruction}"
+        f"🚨 **ACTION:**\n{instruction}\n\n"
+        f"🔗 [Open Research Dashboard](https://trading-bot-ui.streamlit.app/)"
     )
     
     try:
