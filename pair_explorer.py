@@ -19,7 +19,6 @@ st.sidebar.header("Pair Configuration")
 # SECURITY: Input sanitization to prevent injection and ensure clean API calls
 def sanitize_ticker(text):
     import re
-    # Remove any characters that aren't letters, numbers, dots, or dashes
     return re.sub(r'[^A-Z0-9.\-]', '', text.upper())
 
 t1_raw = st.sidebar.text_input("Ticker 1", value="LOW")
@@ -38,7 +37,6 @@ def calculate_rsi(series, periods=14):
 
 if st.sidebar.button("Run Deep Analysis"):
     with st.spinner(f"Fetching market data for {t1} and {t2}..."):
-        # Download data
         data = yf.download([t1, t2], period=time_period, progress=False)
         
         if not data.empty and len(data.columns) >= 2:
@@ -61,11 +59,9 @@ if st.sidebar.button("Run Deep Analysis"):
             z_score = (spread - spread.mean()) / spread.std()
             curr_z = z_score.iloc[-1]
             
-            # Correlation & Cointegration
             correlation = prices[t1].corr(prices[t2])
             score, pvalue, _ = coint(prices[t1], prices[t2])
             
-            # RSI Calculation
             rsi1 = calculate_rsi(prices[t1]).iloc[-1]
             rsi2 = calculate_rsi(prices[t2]).iloc[-1]
 
@@ -84,8 +80,6 @@ if st.sidebar.button("Run Deep Analysis"):
             # --- Visualization ---
             st.subheader("Statistical Divergence Analysis")
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-            
-            # Top Chart: Normalized Prices
             norm1 = (prices[t1] / prices[t1].iloc[0]) * 100
             norm2 = (prices[t2] / prices[t2].iloc[0]) * 100
             ax1.plot(norm1, label=f"{t1} (Normalized)", color='#2ecc71', linewidth=2)
@@ -93,8 +87,6 @@ if st.sidebar.button("Run Deep Analysis"):
             ax1.set_title("Price Correlation (Starting at 100)", fontsize=14)
             ax1.legend()
             ax1.grid(alpha=0.3)
-
-            # Bottom Chart: Z-Score
             ax2.plot(z_score, color='#9b59b6', linewidth=2)
             ax2.axhline(2.0, color='#e74c3c', linestyle='--', label="Sell Threshold")
             ax2.axhline(-2.0, color='#27ae60', linestyle='--', label="Buy Threshold")
@@ -105,51 +97,63 @@ if st.sidebar.button("Run Deep Analysis"):
             plt.tight_layout()
             st.pyplot(fig)
             
-            # --- COMPREHENSIVE RISK ASSESSMENT (AT THE BOTTOM) ---
+            # --- COMPREHENSIVE RISK ASSESSMENT ---
             st.divider()
             st.subheader("🕵️ Deep Risk & Suitability Assessment")
-            
             r_col1, r_col2 = st.columns(2)
             
             with r_col1:
                 st.markdown("#### 📐 Statistical Foundation")
-                # Correlation Verdict
-                if correlation > 0.85:
+                corr_pass = correlation > 0.85
+                coint_pass = pvalue < 0.05
+                
+                if corr_pass:
                     st.success(f"**Correlation:** {correlation:.2%} (Strong relationship)")
                 else:
                     st.warning(f"**Correlation:** {correlation:.2%} (Weak relationship - Risky)")
                 
-                # Cointegration Verdict
-                if pvalue < 0.05:
-                    st.success(f"**Cointegration:** P-Value {pvalue:.4f} (Statistically Significant - High probability of mean-reversion)")
+                if coint_pass:
+                    st.success(f"**Cointegration:** P-Value {pvalue:.4f} (Significant)")
                 else:
-                    st.error(f"**Cointegration:** P-Value {pvalue:.4f} (NOT Significant - The 'Breakup' risk is high)")
+                    st.error(f"**Cointegration:** P-Value {pvalue:.4f} (Not Significant)")
 
             with r_col2:
                 st.markdown("#### ⚡ Individual Stock Momentum")
+                rsi_neutral = (30 < rsi1 < 70) and (30 < rsi2 < 70)
                 st.write(f"**{t1} RSI:** {rsi1:.2f}")
                 st.write(f"**{t2} RSI:** {rsi2:.2f}")
                 
-                # RSI Confluence Logic
-                if rsi1 > 70 or rsi2 > 70:
-                    st.warning("⚠️ One stock is currently Overbought. Wait for exhaustion.")
-                elif rsi1 < 30 or rsi2 < 30:
-                    st.warning("⚠️ One stock is currently Oversold. Reversal may be imminent.")
-                else:
+                if rsi_neutral:
                     st.success("✅ Momentum is neutral. Safe for statistical entry.")
+                else:
+                    st.warning("⚠️ Momentum Alert: One stock is reaching an extreme (Overbought/Oversold).")
 
-            # --- FINAL TRADING VERDICT ---
+            # --- FINAL INTEGRATED TRADING VERDICT ---
             st.markdown("### 🏁 Final Execution Signal")
             
-            # Signal Logic
-            if curr_z >= 2.0 and pvalue < 0.05:
-                st.error(f"🔴 **STRONG SELL SIGNAL:** {high_ticker} is statistically overvalued vs {low_ticker}. Execute Pairs Trade.")
-            elif curr_z <= -2.0 and pvalue < 0.05:
-                st.success(f"🟢 **STRONG BUY SIGNAL:** {high_ticker} is statistically undervalued vs {low_ticker}. Execute Pairs Trade.")
-            elif abs(curr_z) >= 2.0:
-                st.warning(f"🟡 **WEAK SIGNAL:** Z-Score is high, but Cointegration is weak. Exercise extreme caution.")
+            z_signal = abs(curr_z) >= 2.0
+            
+            # The "Informed" Logic: All 3 pillars must be green for a Strong Signal
+            if z_signal and coint_pass and corr_pass and rsi_neutral:
+                if curr_z >= 2.0:
+                    st.error(f"🚀 **STRONG SELL SIGNAL:** All conditions met. {high_ticker} is extremely overvalued vs {low_ticker}. Probabilistic high-conviction trade.")
+                else:
+                    st.success(f"🚀 **STRONG BUY SIGNAL:** All conditions met. {high_ticker} is extremely undervalued vs {low_ticker}. Probabilistic high-conviction trade.")
+            
+            elif z_signal:
+                # Z-Score is triggered, but other factors are failing
+                reasons = []
+                if not coint_pass: reasons.append("Weak Cointegration (P-Value > 0.05)")
+                if not corr_pass: reasons.append("Low Correlation")
+                if not rsi_neutral: reasons.append("Extreme RSI (Momentum Risk)")
+                
+                st.warning(f"⚠️ **CAUTION:** Z-Score is at a signal level ({curr_z:.2f}), but the trade is **NOT** recommended due to: {', '.join(reasons)}.")
+            
+            elif not z_signal and coint_pass and corr_pass:
+                st.info("⚖️ **WAITING:** The relationship is statistically perfect, but the stocks are currently at equilibrium. No entry signal yet.")
+            
             else:
-                st.info("⚖️ **NO SIGNAL:** The pair is currently trading within normal statistical boundaries.")
+                st.info("⚖️ **NO SIGNAL:** No statistical divergence detected.")
                 
             st.caption("Disclaimer: This tool provides mathematical analysis only. All trading involves capital risk.")
 
