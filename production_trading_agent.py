@@ -17,19 +17,9 @@ import pandas as pd
 import asyncio
 from telegram import Bot
 import os
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
-
-# --- BUG FIX: DISABLE YFINANCE CACHE ---
-# This prevents the "database is locked" error on shared runners like GitHub Actions
-yf.set_tz_cache(False)
-
-# --- MODULAR IMPORTS ---
-try:
-    from trading_pairs import APPROVED_PAIRS
-except ImportError:
-    print("❌ Critical Error: trading_pairs.py not found.")
-    APPROVED_PAIRS = {}
 
 # --- SECURITY & ENVIRONMENT ---
 load_dotenv() 
@@ -73,47 +63,64 @@ async def run_market_scan():
     is_health_check_day = day_of_week in [0, 4]
     
     print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs...")
+    
+    # MODULAR IMPORTS
+    try:
+        from trading_pairs import APPROVED_PAIRS
+    except ImportError:
+        print("❌ Critical Error: trading_pairs.py not found.")
+        return
+
+    # Sizing
     trade_size_usd = calculate_kelly_position_size(0.60, 2.00, TOTAL_ACCOUNT_EQUITY)
     
     signals_detected = []
     summary_report = []
 
+    # Bypassing yfinance cache by using a custom requests session
+    # This prevents the 'database is locked' error on cloud runners
+    session = requests.Session()
+
     for pair_id, details in APPROVED_PAIRS.items():
         ticker_a, ticker_b = details['ticker_a'], details['ticker_b']
         
-        # 1. DOWNLOAD DATA (With no caching to avoid locks)
-        data = yf.download([ticker_a, ticker_b], period="1y", progress=False)
-        
-        # 2. SAFETY CHECK: Ensure data exists before doing math
-        if data.empty or len(data.columns) < 2:
-            print(f"⚠️ Warning: Could not download complete data for {pair_id}. Skipping.")
-            continue
+        # 1. DOWNLOAD DATA (Using custom session to avoid cache locks)
+        try:
+            data = yf.download([ticker_a, ticker_b], period="1y", progress=False, session=session)
             
-        prices = data['Close'].dropna()
-        
-        # 3. SECOND SAFETY CHECK: Ensure prices aren't empty after dropping NaNs
-        if prices.empty:
-            print(f"⚠️ Warning: No overlapping dates for {pair_id}. Skipping.")
-            continue
+            if data.empty or len(data.columns) < 2:
+                print(f"⚠️ Warning: Data missing for {pair_id}. Skipping.")
+                continue
+                
+            prices = data['Close'].dropna()
+            if prices.empty:
+                continue
+                
+            p_a, p_b = prices[ticker_a].iloc[-1], prices[ticker_b].iloc[-1]
             
-        p_a, p_b = prices[ticker_a].iloc[-1], prices[ticker_b].iloc[-1]
-        
-        hedge_ratio = p_a / p_b
-        spread = prices[ticker_a] - (hedge_ratio * prices[ticker_b])
-        z_score_series = (spread - spread.mean()) / spread.std()
-        current_z = z_score_series.iloc[-1]
-        
-        shares_a = max(1, round((trade_size_usd / 2) / p_a, 2))
-        shares_b = max(1, round((trade_size_usd / 2) / p_b, 2))
-        
-        summary_report.append(f"• {details['name']}: Z={current_z:.2f}")
+            # 2. MATH
+            hedge_ratio = p_a / p_b
+            spread = prices[ticker_a] - (hedge_ratio * prices[ticker_b])
+            z_score_series = (spread - spread.mean()) / spread.std()
+            current_z = z_score_series.iloc[-1]
+            
+            # 3. SIZING
+            shares_a = max(1, round((trade_size_usd / 2) / p_a, 2))
+            shares_b = max(1, round((trade_size_usd / 2) / p_b, 2))
+            
+            summary_report.append(f"• {details['name']}: Z={current_z:.2f}")
 
-        if current_z >= 2.0:
-            rec = f"🟢 SELL {shares_a} {ticker_a} / BUY {shares_b} {ticker_b}"
-            signals_detected.append((details['name'], current_z, rec))
-        elif current_z <= -2.0:
-            rec = f"🟢 BUY {shares_a} {ticker_a} / SELL {shares_b} {ticker_b}"
-            signals_detected.append((details['name'], current_z, rec))
+            # 4. SIGNAL LOGIC
+            if current_z >= 2.0:
+                rec = f"🟢 SELL {shares_a} {ticker_a} / BUY {shares_b} {ticker_b}"
+                signals_detected.append((details['name'], current_z, rec))
+            elif current_z <= -2.0:
+                rec = f"🟢 BUY {shares_a} {ticker_a} / SELL {shares_b} {ticker_b}"
+                signals_detected.append((details['name'], current_z, rec))
+                
+        except Exception as e:
+            print(f"⚠️ Error processing {pair_id}: {e}")
+            continue
 
     # --- SENDING ALERTS ---
     for name, z, rec in signals_detected:
@@ -131,8 +138,8 @@ async def run_market_scan():
         report_body = "\n".join(summary_report)
         health_msg = (
             f"🩺 **AGENT HEALTH CHECK: {report_type}**\n\n"
-            f"The bot is running correctly. No trading signals detected today.\n\n"
-            f"**Current Pair Status:**\n{report_body}\n\n"
+            f"The bot is running correctly. No signals detected.\n\n"
+            f"**Pair Status:**\n{report_body}\n\n"
             f"🔗 [Open Research Dashboard](https://trading-bot-ui.streamlit.app/)"
         )
         await send_telegram_notification(health_msg)
