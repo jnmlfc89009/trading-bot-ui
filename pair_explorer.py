@@ -33,23 +33,50 @@ if st.sidebar.button("Run Deep Analysis"):
                 high_ticker, low_ticker = t2, t1
                 high_price, low_price = p2_last, p1_last
             
-            # --- Metrics Dashboard ---
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric(f"💎 Higher Priced ({high_ticker})", f"${high_price:.2f}")
-            with col2:
-                st.metric(f"🪙 Lower Priced ({low_ticker})", f"${low_price:.2f}")
-            
             # --- Math Engine ---
             ratio = high_price / low_price
             spread = prices[high_ticker] - (ratio * prices[low_ticker])
             z_score = (spread - spread.mean()) / spread.std()
             curr_z = z_score.iloc[-1]
             
-            with col3:
-                st.metric("🎯 Current Z-Score", f"{curr_z:.2f}", delta_color="inverse")
+            # Correlation Calculation
+            correlation = prices[t1].corr(prices[t2])
+            
+            # --- Pair Suitability Logic ---
+            if correlation > 0.90:
+                suitability = "🔥 EXCELLENT PAIR"
+                color = "green"
+                explainer = "These stocks move in lock-step. Highly reliable for hedging."
+            elif correlation > 0.75:
+                suitability = "✅ GOOD PAIR"
+                color = "blue"
+                explainer = "Strong relationship. Suitable for standard pairs trading."
+            elif correlation > 0.50:
+                suitability = "⚠️ WEAK PAIR"
+                color = "orange"
+                explainer = "Moderate relationship. High risk of 'divergence' where they never come back together."
+            else:
+                suitability = "❌ POOR PAIR"
+                color = "red"
+                explainer = "Low correlation. These stocks move independently. Not recommended for hedging."
 
-            # --- Visualization (The "Jupyter" View) ---
+            # --- Metrics Dashboard ---
+            st.subheader("System Health & Analysis")
+            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+            with m_col1:
+                st.metric(f"💎 High ({high_ticker})", f"${high_price:.2f}")
+            with m_col2:
+                st.metric(f"🪙 Low ({low_ticker})", f"${low_price:.2f}")
+            with m_col3:
+                st.metric("🔗 Correlation", f"{correlation:.2%}")
+            with m_col4:
+                st.metric("🎯 Current Z", f"{curr_z:.2f}")
+
+            # Suitability Banner
+            st.markdown(f"### Suitability: :{color}[{suitability}]")
+            st.caption(explainer)
+
+            # --- Visualization ---
             st.subheader("Statistical Divergence Analysis")
             
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
