@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# macOS-specific files
+.DS_Store
+
+# Data files
+*.csv
+*.json
+*.xlsx
+*.docx
+*.gdoc
+
+# Project specific
+production_trading_agent.py
