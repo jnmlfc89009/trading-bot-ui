@@ -1,0 +1,29 @@
+name: Automated Trading Bot
+
+on:
+  schedule:
+    # Run every day at 01:15 UTC (9:15 AM Singapore Time)
+    - cron: '15 1 * * *'
+  workflow_dispatch: # Allows manual trigger for testing
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          pip install yfinance pandas numpy python-telegram-bot python-dotenv
+
+      - name: Run Trading Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python production_trading_agent.py
