@@ -22,8 +22,7 @@ from dotenv import load_dotenv
 
 # --- BUG FIX: DISABLE YFINANCE CACHE ---
 # This prevents the "database is locked" error on shared runners like GitHub Actions
-import yfinance.cache as yfc
-yfc.disable()
+yf.set_tz_cache(False)
 
 # --- MODULAR IMPORTS ---
 try:
