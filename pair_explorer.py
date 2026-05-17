@@ -34,7 +34,7 @@ t2_raw = st.sidebar.text_input("Ticker 2 (e.g. 005930.KS)", value="005930.KS") #
 
 t1 = sanitize_ticker(t1_raw)
 t2 = sanitize_ticker(t2_raw)
-time_period = st.sidebar.selectbox("Lookback Period", options=["6mo", "1y", "2y"], index=1)
+time_period = st.sidebar.selectbox("Lookback Period", options=["3mo", "6mo", "1y", "2y"], index=1)
 
 def calculate_rsi(series, periods=14):
     delta = series.diff()
