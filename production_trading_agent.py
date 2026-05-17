@@ -17,9 +17,16 @@ import pandas as pd
 import asyncio
 from telegram import Bot
 import os
-import requests
+from curl_cffi import requests
 from datetime import datetime
 from dotenv import load_dotenv
+
+# --- MODULAR IMPORTS ---
+try:
+    from trading_pairs import APPROVED_PAIRS
+except ImportError:
+    print("❌ Critical Error: trading_pairs.py not found.")
+    APPROVED_PAIRS = {}
 
 # --- SECURITY & ENVIRONMENT ---
 load_dotenv() 
@@ -62,29 +69,22 @@ async def run_market_scan():
     day_of_week = today.weekday() # 0 = Monday, 4 = Friday
     is_health_check_day = day_of_week in [0, 4]
     
-    print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs...")
+    print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs in the database...")
     
-    # MODULAR IMPORTS
-    try:
-        from trading_pairs import APPROVED_PAIRS
-    except ImportError:
-        print("❌ Critical Error: trading_pairs.py not found.")
-        return
-
     # Sizing
     trade_size_usd = calculate_kelly_position_size(0.60, 2.00, TOTAL_ACCOUNT_EQUITY)
     
     signals_detected = []
     summary_report = []
 
-    # Bypassing yfinance cache by using a custom requests session
-    # This prevents the 'database is locked' error on cloud runners
+    # Using curl_cffi session as required by recent yfinance updates
+    # This also effectively bypasses the yfinance SQLite cache lock issue
     session = requests.Session()
 
     for pair_id, details in APPROVED_PAIRS.items():
         ticker_a, ticker_b = details['ticker_a'], details['ticker_b']
         
-        # 1. DOWNLOAD DATA (Using custom session to avoid cache locks)
+        # 1. DOWNLOAD DATA
         try:
             data = yf.download([ticker_a, ticker_b], period="1y", progress=False, session=session)
             
