@@ -6,7 +6,11 @@ from telegram import Bot
 import os
 from dotenv import load_dotenv
 
-# Load credentials (Works for both local .env and GitHub Secrets)
+# --- MODULAR IMPORT ---
+# This pulls your stock pairs from the separate trading_pairs.py file
+from trading_pairs import APPROVED_PAIRS
+
+# Load credentials
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -15,16 +19,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # 1. CORE SYSTEM CONFIGURATION
 # =====================================================================
 TOTAL_ACCOUNT_EQUITY = 20000 
-
-# High-Conviction Pairs researched today
-APPROVED_PAIRS = {
-    "US_UTILITIES": {
-        "ticker_a": "DUK", "ticker_b": "SO", "name": "Duke Energy vs Southern Co"
-    },
-    "US_PAYMENTS": {
-        "ticker_a": "V", "ticker_b": "MA", "name": "Visa vs Mastercard"
-    }
-}
 
 # =====================================================================
 # 2. RISK & POSITION SIZING ENGINE
@@ -57,7 +51,7 @@ async def send_telegram_notification(pair_name, z_score, instruction):
 # 4. EXECUTION PIPELINE
 # =====================================================================
 async def run_market_scan():
-    print("🤖 Scanning markets...")
+    print(f"🤖 Scanning {len(APPROVED_PAIRS)} pairs in the database...")
     trade_size_usd = calculate_kelly_position_size(0.60, 2.00, TOTAL_ACCOUNT_EQUITY)
     
     for pair_id, details in APPROVED_PAIRS.items():
