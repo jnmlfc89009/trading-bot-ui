@@ -7,13 +7,26 @@ from statsmodels.tsa.stattools import coint
 
 st.set_page_config(page_title="Pairs Trading Pro", layout="wide")
 
+# --- PROMINENT LEGAL DISCLAIMER ---
+st.warning("⚠️ **LEGAL DISCLAIMER:** This tool is for **educational and informational purposes only**. Algorithmic trading involves a high risk of losing money. The creator of this tool is not a financial advisor. Past performance does not guarantee future results. **Use this tool at your own risk.**")
+
 st.title("📈 Pairs Trading Pro Explorer")
 st.markdown("Enter two tickers to analyze their statistical relationship and identify mean-reversion signals.")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Pair Configuration")
-t1 = st.sidebar.text_input("Ticker 1", value="LOW").upper()
-t2 = st.sidebar.text_input("Ticker 2", value="HD").upper()
+
+# SECURITY: Input sanitization to prevent injection and ensure clean API calls
+def sanitize_ticker(text):
+    import re
+    # Remove any characters that aren't letters, numbers, dots, or dashes
+    return re.sub(r'[^A-Z0-9.\-]', '', text.upper())
+
+t1_raw = st.sidebar.text_input("Ticker 1", value="LOW")
+t2_raw = st.sidebar.text_input("Ticker 2", value="HD")
+
+t1 = sanitize_ticker(t1_raw)
+t2 = sanitize_ticker(t2_raw)
 time_period = st.sidebar.selectbox("Lookback Period", options=["3mo", "6mo", "1y", "2y"], index=1)
 
 def calculate_rsi(series, periods=14):

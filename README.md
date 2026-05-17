@@ -35,4 +35,9 @@ An interactive algorithmic trading dashboard built with Python and Streamlit. Th
    ```
 
 ## ⚖️ Disclaimer
-This project is for educational purposes only. Algorithmic trading involves significant risk. Always perform your own due diligence before deploying capital.
+This project is for educational purposes only. Algorithmic trading involves significant risk. Always perform your own due diligence before deploying capital. Use this tool at your own risk.
+
+## 🔒 Security & Privacy
+- **Input Sanitization:** The UI includes regex-based filtering to prevent malicious code injection through ticker inputs.
+- **Credential Safety:** NEVER commit your `GMAIL_APP_PASS` or other secrets directly to GitHub. 
+- **Production Bot:** For the `production_trading_agent.py` script, it is highly recommended to use **Environment Variables** or a `.env` file (which is ignored by `.gitignore`) to store sensitive login data.
