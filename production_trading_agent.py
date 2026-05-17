@@ -20,6 +20,11 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 
+# --- BUG FIX: DISABLE YFINANCE CACHE ---
+# This prevents the "database is locked" error on shared runners like GitHub Actions
+import yfinance.cache as yfc
+yfc.disable()
+
 # --- MODULAR IMPORTS ---
 try:
     from trading_pairs import APPROVED_PAIRS
@@ -49,6 +54,9 @@ def calculate_kelly_position_size(win_rate, win_loss_ratio, account_equity):
 # =====================================================================
 async def send_telegram_notification(message):
     """Dispatches a formatted alert message to your phone."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Error: Telegram credentials missing.")
+        return
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
@@ -63,9 +71,6 @@ async def run_market_scan():
     """Main loop: Iterates through stock pairs and identifies signals."""
     today = datetime.now()
     day_of_week = today.weekday() # 0 = Monday, 4 = Friday
-    
-    # Determine if we should send a mandatory Health Check report
-    # 0 is Monday, 4 is Friday
     is_health_check_day = day_of_week in [0, 4]
     
     print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs...")
@@ -77,11 +82,21 @@ async def run_market_scan():
     for pair_id, details in APPROVED_PAIRS.items():
         ticker_a, ticker_b = details['ticker_a'], details['ticker_b']
         
+        # 1. DOWNLOAD DATA (With no caching to avoid locks)
         data = yf.download([ticker_a, ticker_b], period="1y", progress=False)
-        if data.empty or len(data.columns) < 2:
-            continue
         
+        # 2. SAFETY CHECK: Ensure data exists before doing math
+        if data.empty or len(data.columns) < 2:
+            print(f"⚠️ Warning: Could not download complete data for {pair_id}. Skipping.")
+            continue
+            
         prices = data['Close'].dropna()
+        
+        # 3. SECOND SAFETY CHECK: Ensure prices aren't empty after dropping NaNs
+        if prices.empty:
+            print(f"⚠️ Warning: No overlapping dates for {pair_id}. Skipping.")
+            continue
+            
         p_a, p_b = prices[ticker_a].iloc[-1], prices[ticker_b].iloc[-1]
         
         hedge_ratio = p_a / p_b
@@ -92,10 +107,8 @@ async def run_market_scan():
         shares_a = max(1, round((trade_size_usd / 2) / p_a, 2))
         shares_b = max(1, round((trade_size_usd / 2) / p_b, 2))
         
-        # Build summary for the report
         summary_report.append(f"• {details['name']}: Z={current_z:.2f}")
 
-        # Signal Logic
         if current_z >= 2.0:
             rec = f"🟢 SELL {shares_a} {ticker_a} / BUY {shares_b} {ticker_b}"
             signals_detected.append((details['name'], current_z, rec))
@@ -104,8 +117,6 @@ async def run_market_scan():
             signals_detected.append((details['name'], current_z, rec))
 
     # --- SENDING ALERTS ---
-    
-    # 1. Send specific Signal Alerts immediately
     for name, z, rec in signals_detected:
         msg = (
             f"🚀 **TRADING SIGNAL DETECTED**\n\n"
@@ -116,7 +127,6 @@ async def run_market_scan():
         )
         await send_telegram_notification(msg)
 
-    # 2. Send Health Check Report on Mon/Fri if no signals were detected
     if is_health_check_day and not signals_detected:
         report_type = "WEEKLY OPEN" if day_of_week == 0 else "WEEKLY CLOSE"
         report_body = "\n".join(summary_report)
