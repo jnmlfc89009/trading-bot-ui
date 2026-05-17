@@ -13,7 +13,6 @@ Workflow:
 """
 
 import yfinance as yf
-import numpy as np
 import pandas as pd
 import asyncio
 from telegram import Bot
