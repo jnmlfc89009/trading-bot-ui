@@ -49,7 +49,6 @@ if st.sidebar.button("Run Global Analysis"):
         tick1 = yf.Ticker(t1)
         tick2 = yf.Ticker(t2)
         
-        # Default to USD if currency metadata is missing
         curr1 = tick1.info.get('currency', 'USD')
         curr2 = tick2.info.get('currency', 'USD')
         
@@ -60,27 +59,22 @@ if st.sidebar.button("Run Global Analysis"):
             prices = data['Close'].dropna()
             
             # --- CURRENCY NORMALIZATION ENGINE ---
-            if curr1 != curr2:
+            is_fx_trade = curr1 != curr2
+            if is_fx_trade:
                 st.info(f"💱 Currency Mismatch Detected: {curr1} vs {curr2}. Normalizing to {curr1}...")
-                
-                # Fetch exchange rate (e.g., KRWUSD=X)
                 fx_ticker = f"{curr2}{curr1}=X"
                 fx_data = yf.download(fx_ticker, period=time_period, progress=False)
                 
                 if not fx_data.empty:
-                    fx_rates = fx_data['Close'].iloc[:, 0] # Get first column as series
-                    # Align dates and forward fill if FX market is closed on stock holidays
+                    fx_rates = fx_data['Close'].iloc[:, 0]
                     prices = prices.join(fx_rates, how='left').ffill().dropna()
                     fx_col = prices.columns[-1]
-                    
-                    # Convert Ticker 2 prices to Ticker 1's currency
                     prices[t2] = prices[t2] * prices[fx_col]
-                    # Clean up the dataframe
                     prices = prices[[t1, t2]]
                 else:
                     st.error(f"Could not fetch exchange rate {fx_ticker}. Results may be skewed.")
 
-            # 3. ANALYTICS ENGINE (Same as before, but on normalized prices)
+            # 3. ANALYTICS ENGINE
             p1_last = prices[t1].iloc[-1]
             p2_last = prices[t2].iloc[-1]
             
@@ -140,10 +134,18 @@ if st.sidebar.button("Run Global Analysis"):
 
             st.markdown("### 🏁 Final Execution Signal")
             z_signal = abs(curr_z) >= 2.0
+            
             if z_signal and coint_pass and corr_pass and rsi_neutral:
                 st.success(f"🚀 **STRONG SIGNAL:** {high_ticker} is statistically overextended. Entry recommended.")
             elif z_signal:
-                st.warning("⚠️ **CAUTION:** Z-Score is triggered, but FX risk or weak cointegration detected.")
+                # Dynamic Caution Message
+                reasons = []
+                if not coint_pass: reasons.append("Weak Cointegration")
+                if not corr_pass: reasons.append("Low Correlation")
+                if not rsi_neutral: reasons.append("Extreme RSI")
+                if is_fx_trade: reasons.append("High FX Volatility Risk")
+                
+                st.warning(f"⚠️ **CAUTION:** Z-Score signal detected, but entry is discouraged due to: {', '.join(reasons)}.")
             else:
                 st.info("⚖️ **NO SIGNAL:** No reliable divergence detected.")
         else:
