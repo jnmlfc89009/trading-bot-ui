@@ -50,7 +50,7 @@ TOTAL_ACCOUNT_EQUITY = 20000
 AV_RATE_LIMIT_DELAY = 13
 
 # Pairs trading signal parameters
-ROLLING_WINDOW  = 60    # Days for rolling mean/std Z-score (adaptive)
+DEFAULT_WINDOW  = 60    # Fallback rolling window if not specified in pair
 MIN_CORRELATION = 0.70  # Min log-return correlation to trust the pair
 Z_ENTRY         = 2.0   # Minimum Z-score to trigger a signal
 Z_STRONG        = 2.5   # Strong signal threshold
@@ -120,7 +120,7 @@ def fetch_close_prices(ticker, max_retries=3):
             one_year_ago = pd.Timestamp.now().normalize() - pd.DateOffset(years=1)
             series = series[series.index >= one_year_ago]
 
-            if len(series) < ROLLING_WINDOW + 10:
+            if len(series) < 150: # Ensures enough data for any typical rolling window (max ~120)
                 print(f"  ⚠️  Insufficient data for {av_ticker} ({len(series)} rows).")
                 return None
 
@@ -153,7 +153,7 @@ def cointegration_label(adf_pvalue):
     else:
         return "❌ Not cointegrated", "review"
 
-def analyse_pair(ticker_a, ticker_b, close_a, close_b):
+def analyse_pair(ticker_a, ticker_b, close_a, close_b, window):
     """
     Full statistical analysis for a pair using log prices, ADF test,
     and rolling Z-score.
@@ -170,7 +170,7 @@ def analyse_pair(ticker_a, ticker_b, close_a, close_b):
     """
     # 1. Align on common dates
     prices = pd.concat([close_a, close_b], axis=1, keys=[ticker_a, ticker_b]).dropna()
-    if len(prices) < ROLLING_WINDOW + 10:
+    if len(prices) < window + 10:
         print(f"  ⚠️  Insufficient overlapping data ({len(prices)} rows).")
         return None
 
@@ -199,8 +199,8 @@ def analyse_pair(ticker_a, ticker_b, close_a, close_b):
     print(f"  🧪 ADF stat={adf_stat:.3f} | p={adf_pvalue:.4f} | {coint_label}")
 
     # 6. Rolling Z-score (adaptive — avoids stale full-year mean drift)
-    rolling_mean = spread.rolling(ROLLING_WINDOW).mean()
-    rolling_std  = spread.rolling(ROLLING_WINDOW).std()
+    rolling_mean = spread.rolling(window).mean()
+    rolling_std  = spread.rolling(window).std()
     z_series     = (spread - rolling_mean) / rolling_std
     current_z    = z_series.dropna().iloc[-1]
 
@@ -220,6 +220,7 @@ def analyse_pair(ticker_a, ticker_b, close_a, close_b):
         "p_b":           p_b,
         "spread_mean":   rolling_mean.iloc[-1],
         "spread_std":    rolling_std.iloc[-1],
+        "window":        window,
     }
 
 def signal_strength_label(z):
@@ -257,6 +258,7 @@ def build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd
     adf_pvalue   = stats["adf_pvalue"]
     coint_label  = stats["coint_label"]
     coint_status = stats["coint_status"]
+    window       = stats.get("window", 60)
     strength     = signal_strength_label(z)
 
     direction = "Spread *ABOVE* mean → A overvalued vs B" if z > 0 else "Spread *BELOW* mean → A undervalued vs B"
@@ -279,13 +281,13 @@ def build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd
         f"  • Z-Score:       `{z:+.2f} σ`  {strength}\n"
         f"  • Correlation:   `{corr:.2f}` ✅\n"
         f"  • Hedge Ratio β: `{hr:.3f}`\n"
-        f"  • Window:        `{ROLLING_WINDOW}-day rolling`\n"
+        f"  • Window:        `{window}-day rolling`\n"
         f"  • {direction}\n\n"
         f"🧪 *Cointegration (ADF Test)*\n"
         f"  • Status:  {coint_label}\n"
         f"  • p-value: `{adf_pvalue:.4f}` (threshold: 0.05)\n\n"
         f"💡 *Interpretation:*\n"
-        f"  A divergence of `{abs(z):.2f}σ` from the 60-day mean\n"
+        f"  A divergence of `{abs(z):.2f}σ` from the {window}-day mean\n"
         f"  has historically reverted. The wider the gap,\n"
         f"  the stronger the mean-reversion case.\n"
         f"{caution_note}\n"
@@ -363,6 +365,7 @@ async def run_market_scan():
         ticker_a = details['ticker_a']
         ticker_b = details['ticker_b']
         name     = details['name']
+        window   = details.get('window', DEFAULT_WINDOW)
 
         print(f"\n🔎 Analysing: {name} ({ticker_a} / {ticker_b})")
 
@@ -382,7 +385,7 @@ async def run_market_scan():
                 continue
 
             # --- ANALYSE PAIR (correlation + ADF + rolling Z-score) ---
-            stats = analyse_pair(ticker_a, ticker_b, close_a, close_b)
+            stats = analyse_pair(ticker_a, ticker_b, close_a, close_b, window)
             if stats is None:
                 summary_report.append(f"  ⚠️  {name}: Failed quality check")
                 continue
