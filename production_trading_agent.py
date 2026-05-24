@@ -12,15 +12,14 @@ Workflow:
 5. Sends 'Health Check' reports on Mondays and Fridays.
 """
 
-import yfinance as yf
 import pandas as pd
+import requests
 import asyncio
 import time
 import random
 from telegram import Bot
 import os
-from curl_cffi import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # --- MODULAR IMPORTS ---
@@ -34,9 +33,19 @@ except ImportError:
 load_dotenv() 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
 # --- CONFIGURATION ---
-TOTAL_ACCOUNT_EQUITY = 20000  
+TOTAL_ACCOUNT_EQUITY = 20000
+
+# Alpha Vantage free tier: 5 requests/min → wait 13s between each call to be safe
+AV_RATE_LIMIT_DELAY = 13
+
+# Remap yfinance-style SGX tickers (.SI) → Alpha Vantage format (.SES)
+TICKER_MAP = {
+    "D05.SI": "D05.SES",
+    "O39.SI": "O39.SES",
+}
 
 # =====================================================================
 # RISK MANAGEMENT ENGINE
@@ -79,50 +88,91 @@ async def run_market_scan():
     signals_detected = []
     summary_report = []
 
-    # Using curl_cffi session as required by recent yfinance updates
-    # This also effectively bypasses the yfinance SQLite cache lock issue
-    session = requests.Session()
+# =====================================================================
+# DATA ENGINE — Alpha Vantage
+# =====================================================================
+def fetch_close_prices(ticker, max_retries=3):
+    """
+    Fetches 1 year of daily Close prices from Alpha Vantage.
+    Automatically remaps SGX tickers from .SI to .SES format.
+    Respects the 5 calls/min free tier limit via AV_RATE_LIMIT_DELAY.
+    """
+    av_ticker = TICKER_MAP.get(ticker, ticker)  # Remap SGX tickers if needed
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "TIME_SERIES_DAILY",
+        "symbol": av_ticker,
+        "outputsize": "full",        # Full history; we'll slice to 1 year
+        "datatype": "json",
+        "apikey": ALPHA_VANTAGE_API_KEY,
+    }
 
-    def download_with_retry(ticker, max_retries=4):
-        """Downloads yfinance data for a single ticker with exponential backoff retry."""
-        for attempt in range(max_retries):
-            try:
-                df = yf.download(ticker, period="1y", progress=False, session=session, auto_adjust=True)
-                if not df.empty:
-                    return df
-                print(f"  ↩️  Empty data for {ticker} (attempt {attempt + 1}/{max_retries}), retrying...")
-            except Exception as e:
-                print(f"  ↩️  Error fetching {ticker} (attempt {attempt + 1}/{max_retries}): {e}")
-            # Exponential backoff: 2s, 4s, 8s + random jitter to avoid thundering herd
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Detect API-level errors (e.g. invalid key, rate limit message)
+            if "Note" in data:
+                print(f"  ⚠️  Alpha Vantage rate limit hit for {av_ticker}. Waiting 60s...")
+                time.sleep(60)
+                continue
+            if "Error Message" in data:
+                print(f"  ❌ Alpha Vantage error for {av_ticker}: {data['Error Message']}")
+                return None
+            if "Time Series (Daily)" not in data:
+                print(f"  ⚠️  Unexpected response for {av_ticker}: {list(data.keys())}")
+                return None
+
+            # Parse into a clean Close price Series
+            ts = data["Time Series (Daily)"]
+            series = pd.Series(
+                {pd.Timestamp(date): float(vals["4. close"]) for date, vals in ts.items()}
+            ).sort_index()
+
+            # Slice to last 1 year
+            one_year_ago = pd.Timestamp.now().normalize() - pd.DateOffset(years=1)
+            series = series[series.index >= one_year_ago]
+
+            if len(series) < 30:
+                print(f"  ⚠️  Insufficient data returned for {av_ticker} ({len(series)} rows).")
+                return None
+
+            print(f"  ✅ {av_ticker}: {len(series)} days of data fetched.")
+            return series
+
+        except Exception as e:
+            print(f"  ↩️  Error fetching {av_ticker} (attempt {attempt + 1}/{max_retries}): {e}")
             sleep_time = (2 ** (attempt + 1)) + random.uniform(0.5, 2.0)
             print(f"  ⏳ Waiting {sleep_time:.1f}s before retry...")
             time.sleep(sleep_time)
-        return None
+
+    print(f"  ❌ Failed to fetch {av_ticker} after {max_retries} attempts.")
+    return None
 
     for pair_id, details in APPROVED_PAIRS.items():
         ticker_a, ticker_b = details['ticker_a'], details['ticker_b']
         
-        # 1. DOWNLOAD DATA — fetch each ticker individually to reduce rate limit pressure
+        # 1. DOWNLOAD DATA via Alpha Vantage (respects rate limit between each call)
         try:
             print(f"📥 Fetching {ticker_a}...")
-            data_a = download_with_retry(ticker_a)
-            time.sleep(random.uniform(1.5, 3.0))  # Polite delay between requests
+            close_a = fetch_close_prices(ticker_a)
+            time.sleep(AV_RATE_LIMIT_DELAY)  # Respect 5 calls/min free tier limit
 
             print(f"📥 Fetching {ticker_b}...")
-            data_b = download_with_retry(ticker_b)
-            time.sleep(random.uniform(1.5, 3.0))  # Polite delay between requests
+            close_b = fetch_close_prices(ticker_b)
+            time.sleep(AV_RATE_LIMIT_DELAY)
 
-            if data_a is None or data_b is None:
-                print(f"⚠️ Warning: Rate limit or data missing for {pair_id} after retries. Skipping.")
+            if close_a is None or close_b is None:
+                print(f"⚠️ Warning: Could not fetch data for {pair_id}. Skipping.")
                 continue
 
-            # Align both series on common dates
-            close_a = data_a['Close'].squeeze().dropna()
-            close_b = data_b['Close'].squeeze().dropna()
+            # Align both series on common trading dates
             prices = pd.concat([close_a, close_b], axis=1, keys=[ticker_a, ticker_b]).dropna()
 
             if prices.empty or len(prices) < 30:
-                print(f"⚠️ Warning: Insufficient price history for {pair_id}. Skipping.")
+                print(f"⚠️ Warning: Insufficient overlapping history for {pair_id}. Skipping.")
                 continue
                 
             p_a, p_b = prices[ticker_a].iloc[-1], prices[ticker_b].iloc[-1]
