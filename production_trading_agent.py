@@ -15,6 +15,8 @@ Workflow:
 import yfinance as yf
 import pandas as pd
 import asyncio
+import time
+import random
 from telegram import Bot
 import os
 from curl_cffi import requests
@@ -81,19 +83,46 @@ async def run_market_scan():
     # This also effectively bypasses the yfinance SQLite cache lock issue
     session = requests.Session()
 
+    def download_with_retry(ticker, max_retries=4):
+        """Downloads yfinance data for a single ticker with exponential backoff retry."""
+        for attempt in range(max_retries):
+            try:
+                df = yf.download(ticker, period="1y", progress=False, session=session, auto_adjust=True)
+                if not df.empty:
+                    return df
+                print(f"  ↩️  Empty data for {ticker} (attempt {attempt + 1}/{max_retries}), retrying...")
+            except Exception as e:
+                print(f"  ↩️  Error fetching {ticker} (attempt {attempt + 1}/{max_retries}): {e}")
+            # Exponential backoff: 2s, 4s, 8s + random jitter to avoid thundering herd
+            sleep_time = (2 ** (attempt + 1)) + random.uniform(0.5, 2.0)
+            print(f"  ⏳ Waiting {sleep_time:.1f}s before retry...")
+            time.sleep(sleep_time)
+        return None
+
     for pair_id, details in APPROVED_PAIRS.items():
         ticker_a, ticker_b = details['ticker_a'], details['ticker_b']
         
-        # 1. DOWNLOAD DATA
+        # 1. DOWNLOAD DATA — fetch each ticker individually to reduce rate limit pressure
         try:
-            data = yf.download([ticker_a, ticker_b], period="1y", progress=False, session=session)
-            
-            if data.empty or len(data.columns) < 2:
-                print(f"⚠️ Warning: Data missing for {pair_id}. Skipping.")
+            print(f"📥 Fetching {ticker_a}...")
+            data_a = download_with_retry(ticker_a)
+            time.sleep(random.uniform(1.5, 3.0))  # Polite delay between requests
+
+            print(f"📥 Fetching {ticker_b}...")
+            data_b = download_with_retry(ticker_b)
+            time.sleep(random.uniform(1.5, 3.0))  # Polite delay between requests
+
+            if data_a is None or data_b is None:
+                print(f"⚠️ Warning: Rate limit or data missing for {pair_id} after retries. Skipping.")
                 continue
-                
-            prices = data['Close'].dropna()
-            if prices.empty:
+
+            # Align both series on common dates
+            close_a = data_a['Close'].squeeze().dropna()
+            close_b = data_b['Close'].squeeze().dropna()
+            prices = pd.concat([close_a, close_b], axis=1, keys=[ticker_a, ticker_b]).dropna()
+
+            if prices.empty or len(prices) < 30:
+                print(f"⚠️ Warning: Insufficient price history for {pair_id}. Skipping.")
                 continue
                 
             p_a, p_b = prices[ticker_a].iloc[-1], prices[ticker_b].iloc[-1]

@@ -20,7 +20,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install yfinance pandas numpy python-telegram-bot python-dotenv
+          pip install yfinance pandas numpy python-telegram-bot python-dotenv curl_cffi
 
       - name: Run Trading Bot
         env:
