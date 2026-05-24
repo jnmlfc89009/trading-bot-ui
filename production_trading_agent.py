@@ -105,6 +105,9 @@ def fetch_close_prices(ticker, max_retries=3):
                 print(f"  ⚠️  Alpha Vantage rate limit hit for {av_ticker}. Waiting 60s...")
                 time.sleep(60)
                 continue
+            if "Information" in data and "rate limit" in data["Information"].lower():
+                print(f"  ❌ Alpha Vantage daily rate limit hit: {data['Information']}")
+                return None
             if "Error Message" in data:
                 print(f"  ❌ Alpha Vantage error for {av_ticker}: {data['Error Message']}")
                 return None
