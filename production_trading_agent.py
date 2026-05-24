@@ -19,7 +19,7 @@ import time
 import random
 from telegram import Bot
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 # --- MODULAR IMPORTS ---
@@ -30,7 +30,7 @@ except ImportError:
     APPROVED_PAIRS = {}
 
 # --- SECURITY & ENVIRONMENT ---
-load_dotenv() 
+load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
@@ -53,40 +53,8 @@ TICKER_MAP = {
 def calculate_kelly_position_size(win_rate, win_loss_ratio, account_equity):
     """Computes optimal dollar amount to risk with a Half-Kelly buffer."""
     kelly_fraction = win_rate - ((1 - win_rate) / win_loss_ratio)
-    safe_kelly = max(0, min(kelly_fraction / 2, 0.25)) 
+    safe_kelly = max(0, min(kelly_fraction / 2, 0.25))
     return account_equity * safe_kelly
-
-# =====================================================================
-# NOTIFICATION SYSTEM
-# =====================================================================
-async def send_telegram_notification(message):
-    """Dispatches a formatted alert message to your phone."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ Error: Telegram credentials missing.")
-        return
-    try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
-        print("✅ Success: Telegram message dispatched.")
-    except Exception as e:
-        print(f"❌ Telegram Error: {e}")
-
-# =====================================================================
-# CORE EXECUTION PIPELINE
-# =====================================================================
-async def run_market_scan():
-    """Main loop: Iterates through stock pairs and identifies signals."""
-    today = datetime.now()
-    day_of_week = today.weekday() # 0 = Monday, 4 = Friday
-    is_health_check_day = day_of_week in [0, 4]
-    
-    print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs in the database...")
-    
-    # Sizing
-    trade_size_usd = calculate_kelly_position_size(0.60, 2.00, TOTAL_ACCOUNT_EQUITY)
-    
-    signals_detected = []
-    summary_report = []
 
 # =====================================================================
 # DATA ENGINE — Alpha Vantage
@@ -102,7 +70,7 @@ def fetch_close_prices(ticker, max_retries=3):
     params = {
         "function": "TIME_SERIES_DAILY",
         "symbol": av_ticker,
-        "outputsize": "full",        # Full history; we'll slice to 1 year
+        "outputsize": "full",       # Full history; we'll slice to 1 year
         "datatype": "json",
         "apikey": ALPHA_VANTAGE_API_KEY,
     }
@@ -151,9 +119,41 @@ def fetch_close_prices(ticker, max_retries=3):
     print(f"  ❌ Failed to fetch {av_ticker} after {max_retries} attempts.")
     return None
 
+# =====================================================================
+# NOTIFICATION SYSTEM
+# =====================================================================
+async def send_telegram_notification(message):
+    """Dispatches a formatted alert message to your phone."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Error: Telegram credentials missing.")
+        return
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+        print("✅ Success: Telegram message dispatched.")
+    except Exception as e:
+        print(f"❌ Telegram Error: {e}")
+
+# =====================================================================
+# CORE EXECUTION PIPELINE
+# =====================================================================
+async def run_market_scan():
+    """Main loop: Iterates through stock pairs and identifies signals."""
+    today = datetime.now()
+    day_of_week = today.weekday()  # 0 = Monday, 4 = Friday
+    is_health_check_day = day_of_week in [0, 4]
+
+    print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs in the database...")
+
+    # Sizing
+    trade_size_usd = calculate_kelly_position_size(0.60, 2.00, TOTAL_ACCOUNT_EQUITY)
+
+    signals_detected = []
+    summary_report = []
+
     for pair_id, details in APPROVED_PAIRS.items():
         ticker_a, ticker_b = details['ticker_a'], details['ticker_b']
-        
+
         # 1. DOWNLOAD DATA via Alpha Vantage (respects rate limit between each call)
         try:
             print(f"📥 Fetching {ticker_a}...")
@@ -174,19 +174,19 @@ def fetch_close_prices(ticker, max_retries=3):
             if prices.empty or len(prices) < 30:
                 print(f"⚠️ Warning: Insufficient overlapping history for {pair_id}. Skipping.")
                 continue
-                
+
             p_a, p_b = prices[ticker_a].iloc[-1], prices[ticker_b].iloc[-1]
-            
+
             # 2. MATH
             hedge_ratio = p_a / p_b
             spread = prices[ticker_a] - (hedge_ratio * prices[ticker_b])
             z_score_series = (spread - spread.mean()) / spread.std()
             current_z = z_score_series.iloc[-1]
-            
+
             # 3. SIZING
             shares_a = max(1, round((trade_size_usd / 2) / p_a, 2))
             shares_b = max(1, round((trade_size_usd / 2) / p_b, 2))
-            
+
             summary_report.append(f"• {details['name']}: Z={current_z:.2f}")
 
             # 4. SIGNAL LOGIC
@@ -196,7 +196,7 @@ def fetch_close_prices(ticker, max_retries=3):
             elif current_z <= -2.0:
                 rec = f"🟢 BUY {shares_a} {ticker_a} / SELL {shares_b} {ticker_b}"
                 signals_detected.append((details['name'], current_z, rec))
-                
+
         except Exception as e:
             print(f"⚠️ Error processing {pair_id}: {e}")
             continue
