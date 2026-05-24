@@ -6,12 +6,16 @@ cloud task (GitHub Actions).
 
 Workflow:
 1. Ingests pre-approved stock pairs from trading_pairs.py.
-2. Validates each pair using log-return correlation (min 0.70).
-3. Computes an OLS-derived hedge ratio on log prices for a stationary spread.
-4. Applies a 60-day rolling Z-score for adaptive, drift-free signals.
-5. Calculates optimal position sizes via the Kelly Criterion.
-6. Dispatches rich indicator alerts directly to a Telegram mobile client.
-7. Sends 'Health Check' reports on Mondays and Fridays.
+2. Validates each pair with log-return correlation (min 0.70).
+3. Runs an ADF cointegration test on the spread residuals.
+   - p < 0.05  → ✅ Cointegrated   : full signal processing
+   - p < 0.10  → ⚠️ Weak           : signal fires with caution flag
+   - p >= 0.10 → ❌ Not cointegrated: no signal, sends PAIR REVIEW ALERT
+4. Computes an OLS-derived hedge ratio on log prices for a stationary spread.
+5. Applies a 60-day rolling Z-score for adaptive, drift-free signals.
+6. Calculates optimal position sizes via the Kelly Criterion.
+7. Dispatches rich indicator alerts directly to a Telegram mobile client.
+8. Sends 'Health Check' reports on Mondays and Fridays.
 """
 
 import pandas as pd
@@ -21,6 +25,7 @@ import asyncio
 import time
 import random
 from telegram import Bot
+from statsmodels.tsa.stattools import adfuller
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -34,8 +39,8 @@ except ImportError:
 
 # --- SECURITY & ENVIRONMENT ---
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN        = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID      = os.getenv("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
 # --- CONFIGURATION ---
@@ -45,11 +50,16 @@ TOTAL_ACCOUNT_EQUITY = 20000
 AV_RATE_LIMIT_DELAY = 13
 
 # Pairs trading signal parameters
-ROLLING_WINDOW   = 60    # Days for rolling mean/std Z-score (adaptive)
-MIN_CORRELATION  = 0.70  # Min log-return correlation to trust the pair
-Z_ENTRY          = 2.0   # Minimum Z-score to trigger a signal
-Z_STRONG         = 2.5   # Strong signal threshold
-Z_EXTREME        = 3.0   # Extreme signal threshold
+ROLLING_WINDOW  = 60    # Days for rolling mean/std Z-score (adaptive)
+MIN_CORRELATION = 0.70  # Min log-return correlation to trust the pair
+Z_ENTRY         = 2.0   # Minimum Z-score to trigger a signal
+Z_STRONG        = 2.5   # Strong signal threshold
+Z_EXTREME       = 3.0   # Extreme signal threshold
+
+# ADF cointegration thresholds (p-value from Augmented Dickey-Fuller test)
+ADF_STRONG  = 0.05   # p < 0.05  → ✅ Cointegrated
+ADF_WEAK    = 0.10   # p < 0.10  → ⚠️ Weakly cointegrated (signal with caution)
+                     # p >= 0.10 → ❌ Not cointegrated (PAIR REVIEW alert only)
 
 # Remap yfinance-style SGX tickers (.SI) → Alpha Vantage format (.SES)
 TICKER_MAP = {
@@ -78,11 +88,11 @@ def fetch_close_prices(ticker, max_retries=3):
     av_ticker = TICKER_MAP.get(ticker, ticker)
     url = "https://www.alphavantage.co/query"
     params = {
-        "function": "TIME_SERIES_DAILY",
-        "symbol":   av_ticker,
+        "function":   "TIME_SERIES_DAILY",
+        "symbol":     av_ticker,
         "outputsize": "full",
-        "datatype": "json",
-        "apikey":   ALPHA_VANTAGE_API_KEY,
+        "datatype":   "json",
+        "apikey":     ALPHA_VANTAGE_API_KEY,
     }
 
     for attempt in range(max_retries):
@@ -129,18 +139,34 @@ def fetch_close_prices(ticker, max_retries=3):
 # =====================================================================
 # SIGNAL ANALYSIS ENGINE
 # =====================================================================
+def cointegration_label(adf_pvalue):
+    """
+    Returns a status emoji + label + trading permission based on ADF p-value.
+    - p < 0.05  → ✅ Cointegrated      → proceed normally
+    - p < 0.10  → ⚠️ Weakly cointegrated → proceed with caution flag
+    - p >= 0.10 → ❌ Not cointegrated   → block signal, send review alert
+    """
+    if adf_pvalue < ADF_STRONG:
+        return "✅ Cointegrated", "proceed"
+    elif adf_pvalue < ADF_WEAK:
+        return "⚠️ Weakly cointegrated", "caution"
+    else:
+        return "❌ Not cointegrated", "review"
+
 def analyse_pair(ticker_a, ticker_b, close_a, close_b):
     """
-    Full statistical analysis for a pair using log prices and rolling Z-score.
+    Full statistical analysis for a pair using log prices, ADF test,
+    and rolling Z-score.
 
     Returns a dict of all computed indicators, or None if the pair is invalid.
 
     Steps:
       1. Align price series on common trading dates.
-      2. Compute log-return correlation — skip pair if below MIN_CORRELATION.
+      2. Log-return correlation filter (min 0.70).
       3. OLS regression on log prices → statistically derived hedge ratio.
       4. Compute log-price spread.
-      5. Apply 60-day rolling Z-score for an adaptive, drift-free signal.
+      5. ADF test on the spread residuals → cointegration verdict.
+      6. 60-day rolling Z-score for an adaptive, drift-free signal.
     """
     # 1. Align on common dates
     prices = pd.concat([close_a, close_b], axis=1, keys=[ticker_a, ticker_b]).dropna()
@@ -152,18 +178,27 @@ def analyse_pair(ticker_a, ticker_b, close_a, close_b):
     log_returns = np.log(prices).diff().dropna()
     correlation = log_returns[ticker_a].corr(log_returns[ticker_b])
     if correlation < MIN_CORRELATION:
-        print(f"  ⚠️  Correlation too low ({correlation:.2f} < {MIN_CORRELATION}). Skipping pair.")
+        print(f"  ⚠️  Correlation too low ({correlation:.2f} < {MIN_CORRELATION}). Skipping.")
         return None
 
-    # 3. OLS hedge ratio on log prices (β from regressing log_a ~ log_b)
-    log_a = np.log(prices[ticker_a])
-    log_b = np.log(prices[ticker_b])
+    # 3. OLS hedge ratio on log prices (β from regressing log_a ~ β·log_b + α)
+    log_a       = np.log(prices[ticker_a])
+    log_b       = np.log(prices[ticker_b])
     hedge_ratio = np.polyfit(log_b, log_a, 1)[0]
 
-    # 4. Log-price spread (stationary, percentage-based deviation)
+    # 4. Log-price spread (percentage-based, more stationary than dollar spread)
     spread = log_a - hedge_ratio * log_b
 
-    # 5. Rolling Z-score (adaptive — avoids stale full-year mean drift)
+    # 5. ADF test on spread residuals to formally confirm cointegration
+    #    H0: spread has a unit root (non-stationary / NOT cointegrated)
+    #    Low p-value → reject H0 → spread IS stationary → pairs ARE cointegrated
+    adf_result  = adfuller(spread, autolag='AIC')
+    adf_pvalue  = adf_result[1]
+    adf_stat    = adf_result[0]
+    coint_label, coint_status = cointegration_label(adf_pvalue)
+    print(f"  🧪 ADF stat={adf_stat:.3f} | p={adf_pvalue:.4f} | {coint_label}")
+
+    # 6. Rolling Z-score (adaptive — avoids stale full-year mean drift)
     rolling_mean = spread.rolling(ROLLING_WINDOW).mean()
     rolling_std  = spread.rolling(ROLLING_WINDOW).std()
     z_series     = (spread - rolling_mean) / rolling_std
@@ -174,13 +209,17 @@ def analyse_pair(ticker_a, ticker_b, close_a, close_b):
     p_b = prices[ticker_b].iloc[-1]
 
     return {
-        "current_z":   current_z,
-        "correlation": correlation,
-        "hedge_ratio": hedge_ratio,
-        "p_a":         p_a,
-        "p_b":         p_b,
-        "spread_mean": rolling_mean.iloc[-1],
-        "spread_std":  rolling_std.iloc[-1],
+        "current_z":     current_z,
+        "correlation":   correlation,
+        "hedge_ratio":   hedge_ratio,
+        "adf_pvalue":    adf_pvalue,
+        "adf_stat":      adf_stat,
+        "coint_label":   coint_label,
+        "coint_status":  coint_status,   # "proceed" | "caution" | "review"
+        "p_a":           p_a,
+        "p_b":           p_b,
+        "spread_mean":   rolling_mean.iloc[-1],
+        "spread_std":    rolling_std.iloc[-1],
     }
 
 def signal_strength_label(z):
@@ -210,17 +249,26 @@ async def send_telegram_notification(message):
 
 def build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd):
     """Builds a rich Telegram signal message with all key indicators."""
-    z        = stats["current_z"]
-    corr     = stats["correlation"]
-    hr       = stats["hedge_ratio"]
-    p_a      = stats["p_a"]
-    p_b      = stats["p_b"]
-    strength = signal_strength_label(z)
+    z            = stats["current_z"]
+    corr         = stats["correlation"]
+    hr           = stats["hedge_ratio"]
+    p_a          = stats["p_a"]
+    p_b          = stats["p_b"]
+    adf_pvalue   = stats["adf_pvalue"]
+    coint_label  = stats["coint_label"]
+    coint_status = stats["coint_status"]
+    strength     = signal_strength_label(z)
 
     direction = "Spread *ABOVE* mean → A overvalued vs B" if z > 0 else "Spread *BELOW* mean → A undervalued vs B"
     shares_a  = max(1, round((trade_size_usd / 2) / p_a, 2))
     # Leg B is hedge-ratio adjusted so both legs correctly offset the spread
     shares_b  = max(1, round((trade_size_usd / 2) * hr / p_b, 2))
+
+    # Caution footer if weakly cointegrated
+    caution_note = (
+        "\n⚠️ *Caution:* ADF p-value is borderline (0.05–0.10).\n"
+        "Mean-reversion is less certain. Consider reduced sizing.\n"
+    ) if coint_status == "caution" else ""
 
     return (
         f"🚨 *TRADING SIGNAL DETECTED*\n"
@@ -228,20 +276,58 @@ def build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd
         f"📌 *Pair:* {name}\n"
         f"🔗 *Tickers:* `{ticker_a}` ↔ `{ticker_b}`\n\n"
         f"📊 *Signal Indicators*\n"
-        f"  • Z-Score: `{z:+.2f} σ`  {strength}\n"
-        f"  • Correlation: `{corr:.2f}` ✅\n"
-        f"  • Hedge Ratio (β): `{hr:.3f}`\n"
-        f"  • Window: `{ROLLING_WINDOW}-day rolling`\n"
+        f"  • Z-Score:       `{z:+.2f} σ`  {strength}\n"
+        f"  • Correlation:   `{corr:.2f}` ✅\n"
+        f"  • Hedge Ratio β: `{hr:.3f}`\n"
+        f"  • Window:        `{ROLLING_WINDOW}-day rolling`\n"
         f"  • {direction}\n\n"
+        f"🧪 *Cointegration (ADF Test)*\n"
+        f"  • Status:  {coint_label}\n"
+        f"  • p-value: `{adf_pvalue:.4f}` (threshold: 0.05)\n\n"
         f"💡 *Interpretation:*\n"
         f"  A divergence of `{abs(z):.2f}σ` from the 60-day mean\n"
         f"  has historically reverted. The wider the gap,\n"
-        f"  the stronger the mean-reversion case.\n\n"
+        f"  the stronger the mean-reversion case.\n"
+        f"{caution_note}\n"
         f"🚀 *Recommended Action:*\n"
         f"  `{action}`\n\n"
         f"💰 *Position Size:* ~${trade_size_usd / 2:,.0f} per leg\n"
         f"  ({shares_a} shares of {ticker_a} @ ${p_a:.2f})\n"
         f"  ({shares_b} shares of {ticker_b} @ ${p_b:.2f})\n\n"
+        f"🔗 [Open Research Dashboard](https://trading-bot-ui.streamlit.app/)"
+    )
+
+def build_pair_review_message(name, ticker_a, ticker_b, stats):
+    """
+    Builds a PAIR REVIEW NEEDED alert when ADF test shows the pair
+    is no longer cointegrated. No trading signal is sent for this pair.
+    """
+    corr       = stats["correlation"]
+    hr         = stats["hedge_ratio"]
+    adf_pvalue = stats["adf_pvalue"]
+    adf_stat   = stats["adf_stat"]
+
+    return (
+        f"🔄 *PAIR REVIEW NEEDED*\n"
+        f"{'─' * 28}\n\n"
+        f"📌 *Pair:* {name}\n"
+        f"🔗 *Tickers:* `{ticker_a}` ↔ `{ticker_b}`\n\n"
+        f"🧪 *Cointegration Test Failed*\n"
+        f"  • ADF stat:  `{adf_stat:.3f}`\n"
+        f"  • p-value:   `{adf_pvalue:.4f}` ❌ (need < 0.05)\n"
+        f"  • Verdict:   Spread is *not mean-reverting*\n\n"
+        f"📉 *What This Means:*\n"
+        f"  The spread between `{ticker_a}` and `{ticker_b}` no longer\n"
+        f"  behaves as a stationary series. Z-score signals on this\n"
+        f"  pair are unreliable — the gap may not close.\n\n"
+        f"  Correlation is still `{corr:.2f}` and β=`{hr:.3f}`, meaning\n"
+        f"  the stocks still move together *directionally*, but the\n"
+        f"  spread has drifted beyond recoverable bounds.\n\n"
+        f"✅ *Recommended Actions:*\n"
+        f"  1\\. Close any open positions on this pair\n"
+        f"  2\\. Research a replacement with similar sector exposure\n"
+        f"  3\\. Update `trading\\_pairs.py` with the new pair\n\n"
+        f"  _This pair will continue to be monitored daily._\n\n"
         f"🔗 [Open Research Dashboard](https://trading-bot-ui.streamlit.app/)"
     )
 
@@ -262,14 +348,15 @@ def build_health_message(report_type, summary_report):
 # =====================================================================
 async def run_market_scan():
     """Main loop: Iterates through stock pairs and identifies signals."""
-    today        = datetime.now()
-    day_of_week  = today.weekday()         # 0 = Monday, 4 = Friday
+    today       = datetime.now()
+    day_of_week = today.weekday()          # 0 = Monday, 4 = Friday
     is_health_check_day = day_of_week in [0, 4]
 
     print(f"🤖 Starting scan for {len(APPROVED_PAIRS)} pairs...")
 
     trade_size_usd   = calculate_kelly_position_size(0.60, 2.00, TOTAL_ACCOUNT_EQUITY)
     signals_detected = []
+    review_alerts    = []
     summary_report   = []
 
     for pair_id, details in APPROVED_PAIRS.items():
@@ -294,33 +381,50 @@ async def run_market_scan():
                 summary_report.append(f"  ❌ {name}: Data unavailable")
                 continue
 
-            # --- ANALYSE PAIR ---
+            # --- ANALYSE PAIR (correlation + ADF + rolling Z-score) ---
             stats = analyse_pair(ticker_a, ticker_b, close_a, close_b)
             if stats is None:
                 summary_report.append(f"  ⚠️  {name}: Failed quality check")
                 continue
 
-            z    = stats["current_z"]
-            corr = stats["correlation"]
-            hr   = stats["hedge_ratio"]
-            strength = signal_strength_label(z)
+            z            = stats["current_z"]
+            corr         = stats["correlation"]
+            hr           = stats["hedge_ratio"]
+            adf_pvalue   = stats["adf_pvalue"]
+            coint_label  = stats["coint_label"]
+            coint_status = stats["coint_status"]
+            strength     = signal_strength_label(z)
 
-            # Add to health check report with full indicators
+            print(f"  📈 Z={z:+.2f} | Corr={corr:.2f} | β={hr:.3f} | ADF p={adf_pvalue:.4f} | {coint_label}")
+
+            # Build health check summary row for this pair (always)
             summary_report.append(
                 f"  • *{name}*\n"
-                f"    Z=`{z:+.2f}σ` | Corr=`{corr:.2f}` | β=`{hr:.3f}` | {strength}"
+                f"    Z=`{z:+.2f}σ` | Corr=`{corr:.2f}` | β=`{hr:.3f}`\n"
+                f"    ADF p=`{adf_pvalue:.4f}` | {coint_label} | {strength}"
             )
 
-            print(f"  📈 Z={z:+.2f} | Corr={corr:.2f} | β={hr:.3f} | {strength}")
+            # --- COINTEGRATION GATE ---
+            if coint_status == "review":
+                # Pair has broken down — queue a review alert, skip signal
+                print(f"  ❌ Pair not cointegrated. Queuing review alert.")
+                review_alerts.append(
+                    build_pair_review_message(name, ticker_a, ticker_b, stats)
+                )
+                continue
 
-            # --- SIGNAL LOGIC ---
+            # --- SIGNAL LOGIC (proceed or caution) ---
             if z >= Z_ENTRY:
                 action = f"SELL {ticker_a} / BUY {ticker_b}"
-                msg = build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd)
+                msg = build_signal_message(
+                    name, ticker_a, ticker_b, stats, action, trade_size_usd
+                )
                 signals_detected.append(msg)
             elif z <= -Z_ENTRY:
                 action = f"BUY {ticker_a} / SELL {ticker_b}"
-                msg = build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd)
+                msg = build_signal_message(
+                    name, ticker_a, ticker_b, stats, action, trade_size_usd
+                )
                 signals_detected.append(msg)
 
         except Exception as e:
@@ -328,17 +432,25 @@ async def run_market_scan():
             summary_report.append(f"  ❌ {name}: Processing error")
             continue
 
+    # --- SEND PAIR REVIEW ALERTS (always, when triggered) ---
+    for msg in review_alerts:
+        await send_telegram_notification(msg)
+
     # --- SEND SIGNAL ALERTS ---
     for msg in signals_detected:
         await send_telegram_notification(msg)
 
-    # --- SEND HEALTH CHECK (Mon / Fri, no signals) ---
+    # --- SEND HEALTH CHECK (Mon / Fri, no trading signals) ---
     if is_health_check_day and not signals_detected:
         report_type = "WEEKLY OPEN" if day_of_week == 0 else "WEEKLY CLOSE"
         health_msg  = build_health_message(report_type, summary_report)
         await send_telegram_notification(health_msg)
 
-    print(f"\n✅ Scan complete. {len(signals_detected)} signal(s) sent.")
+    print(
+        f"\n✅ Scan complete. "
+        f"{len(signals_detected)} signal(s), "
+        f"{len(review_alerts)} pair review alert(s) sent."
+    )
 
 if __name__ == "__main__":
     asyncio.run(run_market_scan())

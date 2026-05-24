@@ -20,7 +20,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas numpy python-telegram-bot python-dotenv requests
+          pip install pandas numpy python-telegram-bot python-dotenv requests statsmodels
 
       - name: Run Trading Bot
         env:
