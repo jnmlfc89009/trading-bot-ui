@@ -219,7 +219,8 @@ def build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd
 
     direction = "Spread *ABOVE* mean → A overvalued vs B" if z > 0 else "Spread *BELOW* mean → A undervalued vs B"
     shares_a  = max(1, round((trade_size_usd / 2) / p_a, 2))
-    shares_b  = max(1, round((trade_size_usd / 2) / p_b, 2))
+    # Leg B is hedge-ratio adjusted so both legs correctly offset the spread
+    shares_b  = max(1, round((trade_size_usd / 2) * hr / p_b, 2))
 
     return (
         f"🚨 *TRADING SIGNAL DETECTED*\n"
@@ -316,11 +317,11 @@ async def run_market_scan():
             if z >= Z_ENTRY:
                 action = f"SELL {ticker_a} / BUY {ticker_b}"
                 msg = build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd)
-                signals_detected.append((msg,))
+                signals_detected.append(msg)
             elif z <= -Z_ENTRY:
                 action = f"BUY {ticker_a} / SELL {ticker_b}"
                 msg = build_signal_message(name, ticker_a, ticker_b, stats, action, trade_size_usd)
-                signals_detected.append((msg,))
+                signals_detected.append(msg)
 
         except Exception as e:
             print(f"  ⚠️  Error processing {pair_id}: {e}")
@@ -328,7 +329,7 @@ async def run_market_scan():
             continue
 
     # --- SEND SIGNAL ALERTS ---
-    for (msg,) in signals_detected:
+    for msg in signals_detected:
         await send_telegram_notification(msg)
 
     # --- SEND HEALTH CHECK (Mon / Fri, no signals) ---
